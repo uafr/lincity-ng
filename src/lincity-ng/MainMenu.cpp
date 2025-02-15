@@ -18,13 +18,13 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 #include "MainMenu.hpp"
 
-#include <SDL.h>                           // for SDL_GetTicks, SDL_GetWindo...
-#include <assert.h>                        // for assert
-#include <physfs.h>                        // for PHYSFS_enumerateFiles, PHY...
-#include <stdio.h>                         // for fprintf, remove, size_t
-#include <stdlib.h>                        // for abs, atoi, unsetenv
+#include <SDL.h>                           // for SDL_GetWindowSize, SDL_Get...
+#include <stdio.h>                         // for fprintf, size_t, stderr
 #include <string.h>                        // for strcpy
 #include <algorithm>                       // for sort
+#include <cassert>
+#include <chrono>                          // for operator>
+#include <cstdlib>                         // for abs, unsetenv
 #include <functional>                      // for bind, _1, function, _2
 #include <iomanip>                         // for operator<<, setfill, setw
 #include <iostream>                        // for basic_ostream, operator<<
@@ -51,7 +51,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #include "gui/WindowManager.hpp"           // for WindowManager
 #include "gui_interface/shared_globals.h"  // for main_screen_originx, main_...
 #include "lincity/engglobs.h"              // for world, total_money, total_...
-#include "lincity/init_game.h"             // for new_city, city_settings
+#include "lincity/init_game.h"             // for _CitySettings, new_city
 #include "lincity/world.h"                 // for World
 #include "tinygettext/gettext.hpp"         // for _, N_, dictionaryManager
 #include "tinygettext/tinygettext.hpp"     // for DictionaryManager
@@ -73,7 +73,7 @@ MainMenu::MainMenu(SDL_Window* _window)
 
     baseName = "";
     lastClickTick = 0;
-    doubleClickButtonName = "";
+    doubleClickButton = nullptr;
     mFilename = "";
     baseName = "";
 }
@@ -124,104 +124,69 @@ void MainMenu::fillNewGameMenu()
   (void)N_("good_times");
 #endif
   const std::string buttonNames[]={"File0","File1","File2","File3","File4","File5"};
-
-  char **files= PHYSFS_enumerateFiles("opening");
-
-  char **fptr=files;
+  std::filesystem::path scenarioDir = getConfig()->appDataDir / "opening";
+  std::filesystem::directory_iterator dirIt(scenarioDir);
 
   CheckButton *button;
-
-  fileMap.clear();
 
   for(int i=0;i<6;i++)
   {
     button = getCheckButton(*newGameMenu, buttonNames[i]);
 
-    button->clicked.connect(std::bind(&MainMenu::selectLoadGameButtonClicked, this, _1, _2));
-    while(*fptr)
-    {
-      if(std::string(*fptr).find(".scn.gz")!=std::string::npos)
+    std::filesystem::path file;
+    while(dirIt != std::filesystem::end(dirIt)) {
+      std::string fName = dirIt->path().filename().string();
+      if(fName.substr(fName.size() - 7) == ".scn.gz"
+        && dirIt->is_regular_file()
+      ) {
+        file = *(dirIt++);
         break;
-      fptr++;
-    }
-    if(*fptr)
-    {
-      std::string f=*fptr;
-      if(f.length()>7){
-        f=f.substr(0,f.length()-7); // truncate .scn.gz
       }
-      // save real name
-      fileMap.insert(std::pair<std::string, std::string>(buttonNames[i], f ));
-      // use translated name for caption
-      button->setCaptionText(_(f.c_str()));
-      fptr++;
+      dirIt++;
     }
+    button->clicked.connect(std::bind(&MainMenu::selectLoadSaveGameButtonClicked, this, _1, _2, false, file));
+    if(!file.empty())
+      button->setCaptionText(_(file.stem().stem().string().c_str()));
     else
-      button->setCaptionText("");
+      button->setCaptionText(_("empty"));
   }
-  PHYSFS_freeList(files);
 
   return;
 }
 
 void MainMenu::fillLoadMenu( bool save /*= false*/ )
 {
-    const std::string buttonNames[]={"File0","File1","File2","File3","File4","File5"};
+  const std::string buttonNames[]={"File0","File1","File2","File3","File4","File5"};
 
-    char** rc = PHYSFS_enumerateFiles("/");
+  char* curfile;
+  CheckButton *button;
 
-    char* curfile;
-    CheckButton *button;
+  for(int i=0;i<6;i++) {
+    std::filesystem::path recentfile;
+    std::filesystem::file_time_type t;
 
-    for(int i=0;i<6;i++) {
-        char* recentfile = NULL;
-        PHYSFS_sint64 t = 0;
+    std::string filestart = std::to_string(i+1) + "_";
+    button = getCheckButton(*(save?saveGameMenu:loadGameMenu),buttonNames[i]);
 
-        std::stringstream filestart;
-        filestart << i+1 << "_";
-        if( save ){
-            button = getCheckButton(*saveGameMenu, buttonNames[i]);
-        } else {
-            button = getCheckButton(*loadGameMenu, buttonNames[i]);
-        }
-        //make sure Button is connected only once
-        button->clicked.clear();
-        if( save )
-            button->clicked.connect(std::bind(&MainMenu::selectSaveGameButtonClicked, this, _1, _2));
-        else {
-            button->clicked.connect(std::bind(&MainMenu::selectLoadGameButtonClicked, this, _1, _2));
-        }
-        for(char** i = rc; *i != 0; i++){
-            curfile = *i;
-            if(std::string( curfile ).find( filestart.str() ) != 0 ) {
-                // && !( curfile->d_type & DT_DIR  ) ) is not portable. So
-                // don't create a directoy named 2_ in a savegame-directory or
-                // you can no longer load from slot 2.
-                continue;
-            }
-            PHYSFS_Stat stat;
-            int err = PHYSFS_stat(curfile, &stat);
-            if(!err) {
-                std::cerr << "could not stat file: " <<
-                    curfile << std::endl;
-                continue;
-            }
-            if (!recentfile || stat.modtime > t) {
-                recentfile = curfile;
-                t = stat.modtime;
-            }
-        }
-#ifdef DEBUG
-        fprintf(stderr,"Most recent file: %s\n\n",recentfile);
-#endif
-
-        if(recentfile) {
-            std::string f = recentfile;
-            button->setCaptionText(f);
-        } else {
-            button->setCaptionText(_("empty"));
-        }
+    for(auto& dirEnt : std::filesystem::directory_iterator(
+      getConfig()->userDataDir)
+    ) {
+      std::string fName = dirEnt.path().filename().string();
+      if(fName.substr(0, filestart.size()) == filestart
+        && dirEnt.is_regular_file()
+        && (dirEnt.last_write_time() > t || recentfile.empty())
+      ) {
+        recentfile = dirEnt;
+        t = dirEnt.last_write_time();
+      }
     }
+
+    // FIXME: this will cause problems with RadioButtonGroup
+    button->clicked.clear();
+    button->clicked.connect(std::bind(&MainMenu::selectLoadSaveGameButtonClicked, this, _1, _2, save, recentfile));
+    button->setCaptionText(recentfile.empty() ? _("empty") :
+      _(recentfile.filename().string().c_str()));
+  }
 }
 
 void
@@ -243,19 +208,23 @@ MainMenu::loadNewGameMenu() {
 
   button = getCheckButton(*newGameMenu,"RiverDelta");
   button->setCaptionText(_("river delta"));
-  button->clicked.connect(std::bind(&MainMenu::selectLoadGameButtonClicked, this, _1, _2));
+  button->clicked.connect(std::bind(&MainMenu::selectLoadSaveGameButtonClicked,
+    this, _1, _2, false, std::filesystem::path()));
 
   button = getCheckButton(*newGameMenu,"DesertArea");
   button->setCaptionText(_("semi desert"));
-  button->clicked.connect(std::bind(&MainMenu::selectLoadGameButtonClicked, this, _1, _2));
+  button->clicked.connect(std::bind(&MainMenu::selectLoadSaveGameButtonClicked,
+    this, _1, _2, false, std::filesystem::path()));
 
   button = getCheckButton(*newGameMenu,"TemperateArea");
   button->setCaptionText(_("temperate"));
-  button->clicked.connect(std::bind(&MainMenu::selectLoadGameButtonClicked, this, _1, _2));
+  button->clicked.connect(std::bind(&MainMenu::selectLoadSaveGameButtonClicked,
+    this, _1, _2, false, std::filesystem::path()));
 
   button = getCheckButton(*newGameMenu,"SwampArea");
   button->setCaptionText(_("swamp"));
-  button->clicked.connect(std::bind(&MainMenu::selectLoadGameButtonClicked, this, _1, _2));
+  button->clicked.connect(std::bind(&MainMenu::selectLoadSaveGameButtonClicked,
+    this, _1, _2, false, std::filesystem::path()));
 }
 
 void
@@ -390,50 +359,26 @@ MainMenu::switchMenu(Component *newMenu) {
   menuSwitch->switchComponent(newMenu->getName());
 }
 
-void
-MainMenu::selectLoadGameButtonClicked(CheckButton* button, int i){
-    selectLoadSaveGameButtonClicked( button , i,  false );
-}
-
-void
-MainMenu::selectSaveGameButtonClicked(CheckButton* button, int i){
-    selectLoadSaveGameButtonClicked( button , i, true );
-}
-
 /**
  * Handle RadioButtons in load, save and new game dialog
  */
 void
-MainMenu::selectLoadSaveGameButtonClicked(CheckButton* button , int, bool save )
-{
+MainMenu::selectLoadSaveGameButtonClicked(CheckButton* button, int /* btn */,
+  bool save, std::filesystem::path file
+) {
+    mFilename = file;
+    baseName = "";
+
     Component *currentMenu = menuSwitch->getActiveComponent();
-    std::string fc=button->getCaptionText();
-    if(newGameMenu == currentMenu) {
-        std::map<std::string, std::string>::iterator iter;
-        iter = fileMap.find( button->getName() );
-        if( iter != fileMap.end() ){
-            fc = iter->second;
-        }
-    }
-
-    std::string file="";
-
-    /* I guess this should be the proper way of selecting in the menu.
-       Everytime we check a new button the last one gets unchecked.
-       If the button checked is an empty one, nothing should be opened
-       Could be done the other way around: the first time an existing item
-       is selected in the menu, an empty one could never be checked again.
-       Anyway I don't think both should be checked, when an empty is checked
-       after an existing one.
-    */
-
     const std::string bs[]={"File0","File1","File2","File3","File4","File5",""};
     for(int i=0;std::string(bs[i]).length();i++) {
         CheckButton *b=getCheckButton(*currentMenu,bs[i]);
-        if(b->getName()!=button->getName()){
+        if(b != button){
             b->uncheck();
         } else {
             b->check();
+            if(newGameMenu != currentMenu)
+              slotNr = i + 1;
         }
     }
 
@@ -441,47 +386,22 @@ MainMenu::selectLoadSaveGameButtonClicked(CheckButton* button , int, bool save )
         const std::string rnd[]={"RiverDelta","DesertArea","TemperateArea","SwampArea",""};
         for(int i=0;std::string(rnd[i]).length();i++) {
             CheckButton *b=getCheckButton(*currentMenu,rnd[i]);
-            if(b->getName()!=button->getName()){
+            if(b != button){
                 b->uncheck();
             } else {
                 b->check();
-                fc = rnd[i];
+                baseName = rnd[i];
             }
         }
     }
 
-
-    if( !fc.length()) {
-        mFilename = "";
-        return;
-    }
-
-    baseName = fc;
-    if(newGameMenu == currentMenu) {
-        file=std::string("opening/")+fc+".scn.gz";
-    } else {
-        file=fc;
-    }
-
-    mFilename="";
-    if(newGameMenu != currentMenu) {
-        slotNr = 1 + atoi(
-                const_cast<char*>(button->getName().substr(4).c_str()) );
-        if( file.length() == 0){
-            mFilename = "";
-            return;
-        }
-    }
-
-    mFilename+=file;
     Uint32 now = SDL_GetTicks();
-
     //doubleclick on Filename loads File
-    if( ( fc == doubleClickButtonName ) &&  ( !save ) &&
+    if( ( button == doubleClickButton ) &&  ( !save ) &&
             ( now - lastClickTick < doubleClickTime ) ) {
 
         lastClickTick = 0;
-        doubleClickButtonName = "";
+        doubleClickButton = nullptr;
         if(newGameMenu == currentMenu) {
             //load scenario
             newGameStartButtonClicked( 0 );
@@ -491,7 +411,7 @@ MainMenu::selectLoadSaveGameButtonClicked(CheckButton* button , int, bool save )
         }
     } else {
         lastClickTick = now;
-        doubleClickButtonName = fc;
+        doubleClickButton = button;
     }
 }
 
@@ -781,6 +701,7 @@ MainMenu::creditsBackButtonClicked(Button* ) {
 void
 MainMenu::optionsBackButtonClicked(Button* )
 {
+    getSound()->playSound( "Click" );
     getConfig()->save();
     int width = 0, height = 0;
     SDL_GetWindowSize(window, &width, &height);
@@ -873,7 +794,6 @@ MainMenu::loadGameBackButtonClicked(Button* ) {
 
 void
 MainMenu::gotoMainMenu() {
-  getSound()->playSound("Click");
   switchMenu(mainMenu);
 }
 
@@ -881,6 +801,8 @@ void
 MainMenu::loadGameLoadButtonClicked(Button *)
 {
     getSound()->playSound( "Click" );
+    if(mFilename.empty())
+      return;
     if( loadCityNG( mFilename ) ){
         quitState = INGAME;
         running = false;
@@ -892,7 +814,7 @@ MainMenu::loadGameSaveButtonClicked(Button *)
 {
     getSound()->playSound( "Click" );
     std::cout << "remove( " << mFilename << ")\n";
-    remove( mFilename.c_str() );
+    std::filesystem::remove(mFilename);
     /* Build filename */
     std::stringstream newStart;
     newStart << slotNr << "_Y";
